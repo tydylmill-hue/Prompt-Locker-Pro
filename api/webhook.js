@@ -1,5 +1,5 @@
 import Stripe from 'stripe';
-import { Keygen } from 'keygen-sh';
+import { Keygen } from 'keygen';
 import nodemailer from 'nodemailer';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -59,3 +59,4 @@ export default async function handler(req, res) {
   res.json({ received: true });
 
 }
+

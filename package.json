@@ -5,8 +5,7 @@
   "type": "module",
   "dependencies": {
     "stripe": "^17.0.0",
-    "keygen": "^0.6.2",          // ← changed from "keygen" to "keygen-sh"
+    "keygen-sh": "^0.6.2",
     "nodemailer": "^6.9.15"
   }
 }
-

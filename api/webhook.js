@@ -25,16 +25,26 @@ async function getRawBody(req) {
 }
 
 //--------------------------------------
-// POLICY MAPPING — Update these IDs
+// PRICE → POLICY MAP
 //--------------------------------------
 const PRICE_TO_POLICY = {
-  // MONTHLY
+  // Monthly
   "price_1ScuGLRquHlFdzqXS2hSNUcv": process.env.KEYGEN_POLICY_MONTHLY,
-  // YEARLY
+
+  // Yearly
   "price_1ScuGzRquHlFdzqXDvyBSf7C": process.env.KEYGEN_POLICY_YEARLY,
-  // LIFETIME
+
+  // Lifetime
   "price_1ScuHrRquHlFdzqX1uokZ9eZ": process.env.KEYGEN_POLICY_LIFETIME,
 };
+
+//--------------------------------------
+// SUCCESS EVENT TYPES
+//--------------------------------------
+const checkoutSuccessEvents = [
+  "checkout.session.completed",
+  "checkout.session.async_payment_succeeded",
+];
 
 //--------------------------------------
 // MAIN WEBHOOK HANDLER
@@ -45,6 +55,7 @@ export default async function handler(req, res) {
   }
 
   let rawBody;
+
   try {
     rawBody = await getRawBody(req);
   } catch (error) {
@@ -53,6 +64,7 @@ export default async function handler(req, res) {
   }
 
   const signature = req.headers["stripe-signature"];
+
   let event;
 
   //--------------------------------------
@@ -69,18 +81,21 @@ export default async function handler(req, res) {
     return res.status(400).send(`Webhook error: ${err.message}`);
   }
 
+  console.log("Stripe Event Received:", event.type);
+
   //--------------------------------------
-  // HANDLE CHECKOUT SESSION COMPLETED
+  // PROCESS ONLY SUCCESSFUL CHECKOUT EVENTS
   //--------------------------------------
-  if (event.type === "checkout.session.completed") {
+  if (checkoutSuccessEvents.includes(event.type)) {
     const session = event.data.object;
 
-    console.log("Checkout Session Completed:", session.id);
+    console.log("Processing Checkout Session:", session.id);
 
     //--------------------------------------
-    // Fetch line items from Stripe
+    // FETCH LINE ITEMS (needed for price ID)
     //--------------------------------------
     let lineItems;
+
     try {
       lineItems = await stripe.checkout.sessions.listLineItems(session.id, {
         limit: 1,
@@ -91,11 +106,10 @@ export default async function handler(req, res) {
     }
 
     //--------------------------------------
-    // SAFELY RESOLVE PRICE ID
+    // GET PRICE ID
     //--------------------------------------
     const priceId =
-      session.metadata?.price_id ||
-      lineItems.data?.[0]?.price?.id;
+      session.metadata?.price_id || lineItems.data?.[0]?.price?.id;
 
     if (!priceId) {
       console.error("PRICE ID NOT FOUND:", { session, lineItems });
@@ -109,15 +123,16 @@ export default async function handler(req, res) {
 
     if (!policyId) {
       console.error("No policy found for price ID:", priceId);
-      return res.status(400).send(`No policy for price ${priceId}`);
+      return res.status(400).send(`No policy defined for price ${priceId}`);
     }
 
     //--------------------------------------
-    // EMAIL LOOKUP
+    // CUSTOMER EMAIL
     //--------------------------------------
     const customerEmail = session.customer_details?.email;
+
     if (!customerEmail) {
-      console.error("NO CUSTOMER EMAIL");
+      console.error("NO CUSTOMER EMAIL IN SESSION");
       return res.status(400).send("Missing customer email");
     }
 
@@ -182,11 +197,11 @@ export default async function handler(req, res) {
         text: `Thank you for your purchase!\n\nYour license key:\n\n${licenseKey}\n\nKeep this key safe.`,
         html: `<p>Thank you for your purchase!</p>
                <p><strong>Your license key:</strong></p>
-               <p style="font-size:20px;font-weight:bold;">${licenseKey}</p>
-               <p>Keep this key safe.</p>`,
+               <p style="font-size:22px;font-weight:bold;">${licenseKey}</p>
+               <p>Keep this key somewhere safe.</p>`,
       });
 
-      console.log("EMAIL SENT to", customerEmail);
+      console.log("EMAIL SENT →", customerEmail);
     } catch (err) {
       console.error("EMAIL ERROR:", err);
     }
@@ -198,8 +213,7 @@ export default async function handler(req, res) {
   }
 
   //--------------------------------------
-  // UNHANDLED EVENT TYPES
+  // IGNORE ALL OTHER STRIPE EVENTS
   //--------------------------------------
   return res.status(200).send("Event ignored");
 }
-

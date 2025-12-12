@@ -1,10 +1,8 @@
 import Stripe from 'stripe';
-import { Keygen } from 'keygen';
 import nodemailer from 'nodemailer';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-const keygen = new Keygen(process.env.KEYGEN_ACCOUNT_TOKEN);
-const transporter = nodemailer.createTransporter({
+const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: process.env.SMTP_PORT,
   secure: process.env.SMTP_SECURE === 'true',
@@ -33,23 +31,48 @@ export default async function handler(req, res) {
     if (!email) return res.status(400).send('No email');
 
     try {
-      // Auto-generate key via Keygen (their format)
-      const license = await keygen.licenses.create({
-        policy: process.env.KEYGEN_POLICY_ID,
-        name: name,
-        email: email,
-        metadata: { stripe_session_id: session.id }
+      // Create license in Keygen using REST API
+      const keygenResponse = await fetch(`https://api.keygen.sh/v1/accounts/${process.env.KEYGEN_ACCOUNT_ID}/licenses`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.KEYGEN_ACCOUNT_TOKEN}`,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          data: {
+            type: 'licenses',
+            attributes: {
+              name: name,
+              email: email
+            },
+            relationships: {
+              policy: {
+                data: { type: 'policies', id: process.env.KEYGEN_POLICY_ID }
+              }
+            }
+          }
+        })
       });
 
+      if (!keygenResponse.ok) {
+        const errorText = await keygenResponse.text();
+        throw new Error(`Keygen API error: ${keygenResponse.status} ${errorText}`);
+      }
+
+      const licenseData = await keygenResponse.json();
+      const licenseKey = licenseData.data.attributes.key;
+
+      // Send email
       await transporter.sendMail({
         from: process.env.SMTP_FROM,
         to: email,
         subject: 'Your Prompt Locker Pro License Key',
-        text: `Thank you!\n\nYour license key: ${license.key}\n\nKeep it safe.\n\nBest,\nPrompt Locker Team`,
-        html: `<p>Thank you!</p><p><strong>License key:</strong><br><code style="font-size:18px;">${license.key}</code></p>`
+        text: `Thank you for your purchase!\n\nYour license key: ${licenseKey}\n\nKeep it safe.\n\nBest,\nPrompt Locker Team`,
+        html: `<p>Thank you for your purchase!</p><p><strong>License key:</strong><br><code style="font-size:18px;">${licenseKey}</code></p><p>Keep it safe.</p>`
       });
 
-      console.log(`Sent ${license.key} to ${email}`);
+      console.log(`Sent ${licenseKey} to ${email}`);
     } catch (err) {
       console.error(err);
       return res.status(500).send('Internal error');
@@ -57,6 +80,4 @@ export default async function handler(req, res) {
   }
 
   res.json({ received: true });
-
 }
-

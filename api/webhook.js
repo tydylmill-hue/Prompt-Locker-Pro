@@ -3,10 +3,12 @@ import nodemailer from "nodemailer";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
+// Stripe requires raw body
 export const config = {
   api: { bodyParser: false },
 };
 
+// Collect raw body for Stripe signature validation
 async function getRawBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -16,22 +18,15 @@ async function getRawBody(req) {
   });
 }
 
-// -------------------------------
-// Price → Policy map
-// -------------------------------
+// Price → Policy mapping
 const PRICE_TO_POLICY = {
-  // Monthly
   [process.env.STRIPE_PRICE_MONTHLY]: process.env.KEYGEN_POLICY_MONTHLY,
-  // Yearly
   [process.env.STRIPE_PRICE_YEARLY]: process.env.KEYGEN_POLICY_YEARLY,
-  // Lifetime
   [process.env.STRIPE_PRICE_LIFETIME]: process.env.KEYGEN_POLICY_LIFETIME,
 };
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).send("Method not allowed");
-  }
+  if (req.method !== "POST") return res.status(405).send("Method not allowed");
 
   let rawBody;
   try {
@@ -41,9 +36,10 @@ export default async function handler(req, res) {
     return res.status(400).send("Invalid body");
   }
 
+  // Stripe signature validation
   const signature = req.headers["stripe-signature"];
-
   let event;
+
   try {
     event = stripe.webhooks.constructEvent(
       rawBody,
@@ -51,19 +47,19 @@ export default async function handler(req, res) {
       process.env.STRIPE_WEBHOOK_SECRET
     );
   } catch (err) {
-    console.error("SIGNATURE ERROR:", err);
-    return res.status(400).send(`Webhook error: ${err.message}`);
+    console.error("SIGNATURE ERROR:", err.message);
+    return res.status(400).send(`Webhook signature error: ${err.message}`);
   }
 
   console.log("Stripe Event Received:", event.type);
 
-  // -----------------------------------------------------
-  // Checkout Session Completed
-  // -----------------------------------------------------
+  // Only process successful checkout
   if (event.type === "checkout.session.completed") {
     const session = event.data.object;
+
     console.log("Processing Checkout Session:", session.id);
 
+    // Fetch line items
     let lineItems;
     try {
       lineItems = await stripe.checkout.sessions.listLineItems(session.id, {
@@ -79,12 +75,12 @@ export default async function handler(req, res) {
 
     if (!priceId) {
       console.error("PRICE ID NOT FOUND");
-      return res.status(400).send("Missing price ID");
+      return res.status(400).send("Missing price");
     }
 
     const policyId = PRICE_TO_POLICY[priceId];
     if (!policyId) {
-      console.error("NO POLICY FOUND FOR:", priceId);
+      console.error("NO POLICY FOUND FOR PRICE:", priceId);
       return res.status(400).send("Invalid price mapping");
     }
 
@@ -94,14 +90,15 @@ export default async function handler(req, res) {
       return res.status(400).send("Missing email");
     }
 
-    // -----------------------------------------------------
-    // CREATE LICENSE IN KEYGEN
-    // -----------------------------------------------------
-    let licenseKey = null;
+    //--------------------------------------------------
+    // CREATE LICENSE VIA KEYGEN (CORRECT JSON FORMAT)
+    //--------------------------------------------------
 
     const keygenUrl = `https://api.keygen.sh/v1/accounts/${process.env.KEYGEN_ACCOUNT_ID}/licenses`;
 
     console.log("Calling Keygen URL:", keygenUrl);
+
+    let licenseKey;
 
     try {
       const keygenRes = await fetch(keygenUrl, {
@@ -115,8 +112,15 @@ export default async function handler(req, res) {
           data: {
             type: "licenses",
             attributes: {
-              policy: policyId,
               name: customerEmail,
+            },
+            relationships: {
+              policy: {
+                data: {
+                  type: "policies",
+                  id: policyId,
+                },
+              },
             },
           },
         }),
@@ -129,16 +133,17 @@ export default async function handler(req, res) {
         return res.status(400).send("Keygen license creation failed");
       }
 
-      licenseKey = keygenData?.data?.attributes?.key;
-      console.log("License key generated:", licenseKey);
+      licenseKey = keygenData.data.attributes.key;
+      console.log("LICENSE CREATED:", licenseKey);
     } catch (err) {
       console.error("KEYGEN REQUEST FAILED:", err);
       return res.status(500).send("Keygen API failure");
     }
 
-    // -----------------------------------------------------
+    //--------------------------------------------------
     // SEND LICENSE EMAIL
-    // -----------------------------------------------------
+    //--------------------------------------------------
+
     try {
       const transporter = nodemailer.createTransport({
         host: process.env.SMTP_HOST,
@@ -157,12 +162,12 @@ export default async function handler(req, res) {
         html: `
           <p>Thank you for your purchase!</p>
           <p><strong>Your license key:</strong></p>
-          <p style="font-size: 20px; font-weight: bold;">${licenseKey}</p>
-          <p>Enter this key inside Prompt Locker Pro to activate your subscription.</p>
+          <p style="font-size: 22px; font-weight: bold;">${licenseKey}</p>
+          <p>Enter this key inside Prompt Locker Pro to activate your license.</p>
         `,
       });
 
-      console.log("Email sent to:", customerEmail);
+      console.log("EMAIL SENT:", customerEmail);
     } catch (err) {
       console.error("EMAIL ERROR:", err);
     }

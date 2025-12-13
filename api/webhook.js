@@ -1,3 +1,5 @@
+//Code verification #1
+
 import Stripe from "stripe";
 import nodemailer from "nodemailer";
 
@@ -177,3 +179,4 @@ export default async function handler(req, res) {
 
   return res.status(200).send("Event ignored");
 }
+

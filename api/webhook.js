@@ -3,18 +3,10 @@ import nodemailer from "nodemailer";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-//--------------------------------------
-// Vercel must NOT parse the body
-//--------------------------------------
 export const config = {
-  api: {
-    bodyParser: false,
-  },
+  api: { bodyParser: false },
 };
 
-//--------------------------------------
-// RAW BODY READER (Required by Stripe)
-//--------------------------------------
 async function getRawBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -24,37 +16,34 @@ async function getRawBody(req) {
   });
 }
 
-//--------------------------------------
-// PRICE → POLICY MAP
-//--------------------------------------
+// -------------------------------
+// Price → Policy map
+// -------------------------------
 const PRICE_TO_POLICY = {
-  "price_1ScuGLRquHlFdzqXS2hSNUcv": process.env.KEYGEN_POLICY_MONTHLY,
-  "price_1ScuGzRquHlFdzqXDvyBSf7C": process.env.KEYGEN_POLICY_YEARLY,
-  "price_1ScuHrRquHlFdzqX1uokZ9eZ": process.env.KEYGEN_POLICY_LIFETIME,
+  // Monthly
+  [process.env.STRIPE_PRICE_MONTHLY]: process.env.KEYGEN_POLICY_MONTHLY,
+  // Yearly
+  [process.env.STRIPE_PRICE_YEARLY]: process.env.KEYGEN_POLICY_YEARLY,
+  // Lifetime
+  [process.env.STRIPE_PRICE_LIFETIME]: process.env.KEYGEN_POLICY_LIFETIME,
 };
 
-//--------------------------------------
-// MAIN HANDLER
-//--------------------------------------
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return res.status(405).send("Method Not Allowed");
+    return res.status(405).send("Method not allowed");
   }
 
   let rawBody;
   try {
     rawBody = await getRawBody(req);
-  } catch (error) {
-    console.error("RAW BODY ERROR:", error);
+  } catch (err) {
+    console.error("RAW BODY ERROR:", err);
     return res.status(400).send("Invalid body");
   }
 
-  //--------------------------------------
-  // VERIFY STRIPE SIGNATURE
-  //--------------------------------------
   const signature = req.headers["stripe-signature"];
-  let event;
 
+  let event;
   try {
     event = stripe.webhooks.constructEvent(
       rawBody,
@@ -62,21 +51,19 @@ export default async function handler(req, res) {
       process.env.STRIPE_WEBHOOK_SECRET
     );
   } catch (err) {
-    console.error("SIGNATURE ERROR:", err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+    console.error("SIGNATURE ERROR:", err);
+    return res.status(400).send(`Webhook error: ${err.message}`);
   }
 
   console.log("Stripe Event Received:", event.type);
 
-  //--------------------------------------
-  // HANDLE CHECKOUT SUCCESS
-  //--------------------------------------
+  // -----------------------------------------------------
+  // Checkout Session Completed
+  // -----------------------------------------------------
   if (event.type === "checkout.session.completed") {
     const session = event.data.object;
-
     console.log("Processing Checkout Session:", session.id);
 
-    // Fetch line items
     let lineItems;
     try {
       lineItems = await stripe.checkout.sessions.listLineItems(session.id, {
@@ -84,42 +71,40 @@ export default async function handler(req, res) {
       });
     } catch (err) {
       console.error("LINE ITEM FETCH ERROR:", err);
-      return res.status(400).send("Cannot fetch line items");
+      return res.status(400).send("Unable to fetch line items");
     }
 
-    // Determine price ID
     const priceId =
-      session.metadata?.price_id ||
-      lineItems.data?.[0]?.price?.id;
+      session.metadata?.price_id || lineItems.data?.[0]?.price?.id;
 
     if (!priceId) {
-      console.error("NO PRICE ID FOUND:", { session, lineItems });
+      console.error("PRICE ID NOT FOUND");
       return res.status(400).send("Missing price ID");
     }
 
     const policyId = PRICE_TO_POLICY[priceId];
-
     if (!policyId) {
-      console.error("NO POLICY FOUND:", priceId);
-      return res.status(400).send("Invalid price → No matching policy");
+      console.error("NO POLICY FOUND FOR:", priceId);
+      return res.status(400).send("Invalid price mapping");
     }
 
     const customerEmail = session.customer_details?.email;
-
     if (!customerEmail) {
-      console.error("NO EMAIL FOUND");
-      return res.status(400).send("Missing customer email");
+      console.error("NO CUSTOMER EMAIL");
+      return res.status(400).send("Missing email");
     }
 
-    //--------------------------------------
-    // CREATE KEYGEN LICENSE (VALID JSON API FORMAT)
-    //--------------------------------------
-    let licenseKey;
+    // -----------------------------------------------------
+    // CREATE LICENSE IN KEYGEN
+    // -----------------------------------------------------
+    let licenseKey = null;
 
-    const keygenURL = `https://api.keygen.sh/v1/${process.env.KEYGEN_ACCOUNT_ID}/licenses`;
+    const keygenUrl = `https://api.keygen.sh/v1/accounts/${process.env.KEYGEN_ACCOUNT_ID}/licenses`;
+
+    console.log("Calling Keygen URL:", keygenUrl);
 
     try {
-      const response = await fetch(keygenURL, {
+      const keygenRes = await fetch(keygenUrl, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${process.env.KEYGEN_API_TOKEN}`,
@@ -130,43 +115,35 @@ export default async function handler(req, res) {
           data: {
             type: "licenses",
             attributes: {
+              policy: policyId,
               name: customerEmail,
-            },
-            relationships: {
-              policy: {
-                data: {
-                  type: "policies",
-                  id: policyId,
-                },
-              },
             },
           },
         }),
       });
 
-      const data = await response.json();
+      const keygenData = await keygenRes.json();
 
-      if (!data?.data?.attributes?.key) {
-        console.error("KEYGEN LICENSE ERROR:", data);
+      if (!keygenRes.ok) {
+        console.error("KEYGEN LICENSE ERROR:", keygenData);
         return res.status(400).send("Keygen license creation failed");
       }
 
-      licenseKey = data.data.attributes.key;
-      console.log("LICENSE CREATED:", licenseKey);
-
+      licenseKey = keygenData?.data?.attributes?.key;
+      console.log("License key generated:", licenseKey);
     } catch (err) {
       console.error("KEYGEN REQUEST FAILED:", err);
-      return res.status(500).send("Keygen request failed");
+      return res.status(500).send("Keygen API failure");
     }
 
-    //--------------------------------------
+    // -----------------------------------------------------
     // SEND LICENSE EMAIL
-    //--------------------------------------
+    // -----------------------------------------------------
     try {
       const transporter = nodemailer.createTransport({
         host: process.env.SMTP_HOST,
         port: Number(process.env.SMTP_PORT),
-        secure: process.env.SMTP_SECURE === "true",
+        secure: false,
         auth: {
           user: process.env.SMTP_USER,
           pass: process.env.SMTP_PASS,
@@ -174,19 +151,20 @@ export default async function handler(req, res) {
       });
 
       await transporter.sendMail({
-        from: `"Prompt Locker Pro" <${process.env.SMTP_USER}>`,
+        from: `"Prompt Locker Pro" <${process.env.SMTP_FROM}>`,
         to: customerEmail,
         subject: "Your Prompt Locker Pro License Key",
-        text: `Thank you for your purchase!\n\nYour license key:\n${licenseKey}`,
-        html: `<p>Thank you for your purchase!</p>
-               <p>Your license key:</p>
-               <p style="font-size:20px;font-weight:bold">${licenseKey}</p>`,
+        html: `
+          <p>Thank you for your purchase!</p>
+          <p><strong>Your license key:</strong></p>
+          <p style="font-size: 20px; font-weight: bold;">${licenseKey}</p>
+          <p>Enter this key inside Prompt Locker Pro to activate your subscription.</p>
+        `,
       });
 
-      console.log("EMAIL SENT:", customerEmail);
+      console.log("Email sent to:", customerEmail);
     } catch (err) {
       console.error("EMAIL ERROR:", err);
-      // Do NOT fail the webhook just because email sending failed
     }
 
     return res.status(200).send("Webhook processed");

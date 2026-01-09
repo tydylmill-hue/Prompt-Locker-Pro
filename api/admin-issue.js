@@ -1,42 +1,52 @@
 import nodemailer from "nodemailer";
 
+/**
+ * 🔒 IMPORTANT:
+ * Disable Next.js body parsing completely.
+ * We will parse the raw stream ourselves.
+ */
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
+
 function json(res, status, body) {
   res.status(status);
   res.setHeader("Content-Type", "application/json");
   res.end(JSON.stringify(body));
 }
 
-// 🔒 Ensure body parsing is NOT skipped
-export const config = {
-  api: {
-    bodyParser: true,
-  },
-};
+async function readJson(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const raw = Buffer.concat(chunks).toString("utf8");
+  if (!raw) throw new Error("Empty body");
+  return JSON.parse(raw);
+}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return json(res, 405, { success: false, error: "Method not allowed" });
   }
 
-  // 🔑 AUTH
+  // 🔑 AUTH HEADER
   const secret = req.headers["x-admin-issue-secret"];
   if (!secret || secret !== process.env.ADMIN_ISSUE_SHARED_SECRET) {
     return json(res, 403, { success: false, error: "Forbidden" });
   }
 
-  // 🔧 HARD PARSE BODY (NO TRUST IN req.body)
-  let body = req.body;
-  if (!body || typeof body !== "object") {
-    try {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    } catch {
-      return json(res, 400, { success: false, error: "Invalid JSON body" });
-    }
+  let body;
+  try {
+    body = await readJson(req);
+  } catch (err) {
+    return json(res, 400, {
+      success: false,
+      error: "Invalid JSON body",
+    });
   }
 
-  const { policyId, email, reason } = body;
+  const { policyId, email, reason } = body || {};
 
   if (!policyId) {
     return json(res, 400, {
@@ -45,7 +55,7 @@ export default async function handler(req, res) {
     });
   }
 
-  // 🔑 CREATE LICENSE (KEYGEN)
+  // 🔑 KEYGEN LICENSE CREATE
   const kgRes = await fetch(
     `https://api.keygen.sh/v1/accounts/${process.env.KEYGEN_ACCOUNT_ID}/licenses`,
     {
@@ -72,7 +82,7 @@ export default async function handler(req, res) {
     }
   );
 
-  const kgData = await kgRes.json();
+  const kgData = await kgRes.json().catch(() => null);
 
   if (!kgRes.ok) {
     return json(res, kgRes.status, {
@@ -85,11 +95,11 @@ export default async function handler(req, res) {
   if (!licenseKey) {
     return json(res, 500, {
       success: false,
-      error: "License key missing from Keygen response",
+      error: "License key missing",
     });
   }
 
-  // ✉️ EMAIL (OPTIONAL)
+  // ✉️ EMAIL (ONLY AFTER LICENSE SUCCESS)
   if (email) {
     const transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST,

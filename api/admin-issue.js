@@ -1,27 +1,52 @@
 import nodemailer from "nodemailer";
 
 function json(res, status, body) {
-  res.status(status).setHeader("Content-Type", "application/json");
+  res.status(status);
+  res.setHeader("Content-Type", "application/json");
   res.end(JSON.stringify(body));
 }
+
+// 🔒 Ensure body parsing is NOT skipped
+export const config = {
+  api: {
+    bodyParser: true,
+  },
+};
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return json(res, 405, { success: false, error: "Method not allowed" });
   }
 
+  // 🔑 AUTH
   const secret = req.headers["x-admin-issue-secret"];
   if (!secret || secret !== process.env.ADMIN_ISSUE_SHARED_SECRET) {
     return json(res, 403, { success: false, error: "Forbidden" });
   }
 
-  const { policyId, email, reason } = req.body || {};
-
-  if (!policyId) {
-    return json(res, 400, { success: false, error: "Missing policyId" });
+  // 🔧 HARD PARSE BODY (NO TRUST IN req.body)
+  let body = req.body;
+  if (!body || typeof body !== "object") {
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch {
+      return json(res, 400, { success: false, error: "Invalid JSON body" });
+    }
   }
 
-  const resp = await fetch(
+  const { policyId, email, reason } = body;
+
+  if (!policyId) {
+    return json(res, 400, {
+      success: false,
+      error: "Missing policyId",
+    });
+  }
+
+  // 🔑 CREATE LICENSE (KEYGEN)
+  const kgRes = await fetch(
     `https://api.keygen.sh/v1/accounts/${process.env.KEYGEN_ACCOUNT_ID}/licenses`,
     {
       method: "POST",
@@ -47,17 +72,24 @@ export default async function handler(req, res) {
     }
   );
 
-  const data = await resp.json();
+  const kgData = await kgRes.json();
 
-  if (!resp.ok) {
-    return json(res, resp.status, {
+  if (!kgRes.ok) {
+    return json(res, kgRes.status, {
       success: false,
-      error: data?.errors?.[0]?.detail || "Keygen error",
+      error: kgData?.errors?.[0]?.detail || "Keygen error",
     });
   }
 
-  const licenseKey = data.data.attributes.key;
+  const licenseKey = kgData?.data?.attributes?.key;
+  if (!licenseKey) {
+    return json(res, 500, {
+      success: false,
+      error: "License key missing from Keygen response",
+    });
+  }
 
+  // ✉️ EMAIL (OPTIONAL)
   if (email) {
     const transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST,
@@ -82,5 +114,4 @@ export default async function handler(req, res) {
     license_key: licenseKey,
     emailed: !!email,
   });
-_attach;
 }

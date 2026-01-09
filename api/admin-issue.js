@@ -1,61 +1,28 @@
 import nodemailer from "nodemailer";
 
-/**
- * 🔒 IMPORTANT:
- * Disable Next.js body parsing completely.
- * We will parse the raw stream ourselves.
- */
-export const config = {
-  api: {
-    bodyParser: false,
-  },
-};
-
-function json(res, status, body) {
-  res.status(status);
-  res.setHeader("Content-Type", "application/json");
-  res.end(JSON.stringify(body));
-}
-
-async function readJson(req) {
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-  const raw = Buffer.concat(chunks).toString("utf8");
-  if (!raw) throw new Error("Empty body");
-  return JSON.parse(raw);
-}
-
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return json(res, 405, { success: false, error: "Method not allowed" });
+    return res.status(405).json({ success: false, error: "Method not allowed" });
   }
 
-  // 🔑 AUTH HEADER
+  // 🔐 AUTH
   const secret = req.headers["x-admin-issue-secret"];
-  if (!secret || secret !== process.env.ADMIN_ISSUE_SHARED_SECRET) {
-    return json(res, 403, { success: false, error: "Forbidden" });
+  if (secret !== process.env.ADMIN_ISSUE_SHARED_SECRET) {
+    return res.status(403).json({ success: false, error: "Forbidden" });
   }
 
-  let body;
-  try {
-    body = await readJson(req);
-  } catch (err) {
-    return json(res, 400, {
+  // ✅ VERCEL STANDARD: req.body IS ALREADY PARSED
+  const { policyId, email, reason } = req.body || {};
+
+  if (!policyId || typeof policyId !== "string") {
+    return res.status(400).json({
       success: false,
-      error: "Invalid JSON body",
+      error: "Invalid policyId",
+      received: req.body,
     });
   }
 
-  const { policyId, email, reason } = body || {};
-
-  if (!policyId) {
-    return json(res, 400, {
-      success: false,
-      error: "Missing policyId",
-    });
-  }
-
-  // 🔑 KEYGEN LICENSE CREATE
+  // 🔑 CREATE LICENSE (KEYGEN)
   const kgRes = await fetch(
     `https://api.keygen.sh/v1/accounts/${process.env.KEYGEN_ACCOUNT_ID}/licenses`,
     {
@@ -82,10 +49,10 @@ export default async function handler(req, res) {
     }
   );
 
-  const kgData = await kgRes.json().catch(() => null);
+  const kgData = await kgRes.json();
 
   if (!kgRes.ok) {
-    return json(res, kgRes.status, {
+    return res.status(kgRes.status).json({
       success: false,
       error: kgData?.errors?.[0]?.detail || "Keygen error",
     });
@@ -93,13 +60,13 @@ export default async function handler(req, res) {
 
   const licenseKey = kgData?.data?.attributes?.key;
   if (!licenseKey) {
-    return json(res, 500, {
+    return res.status(500).json({
       success: false,
       error: "License key missing",
     });
   }
 
-  // ✉️ EMAIL (ONLY AFTER LICENSE SUCCESS)
+  // ✉️ EMAIL
   if (email) {
     const transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST,
@@ -119,9 +86,9 @@ export default async function handler(req, res) {
     });
   }
 
-  return json(res, 200, {
+  return res.status(200).json({
     success: true,
     license_key: licenseKey,
-    emailed: !!email,
+    emailed: Boolean(email),
   });
 }

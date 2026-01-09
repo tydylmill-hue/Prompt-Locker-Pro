@@ -1,18 +1,25 @@
 import nodemailer from "nodemailer";
 
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: "1mb",
+    },
+  },
+};
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, error: "Method not allowed" });
   }
 
-  // 🔐 AUTH
   const secret = req.headers["x-admin-issue-secret"];
   if (secret !== process.env.ADMIN_ISSUE_SHARED_SECRET) {
     return res.status(403).json({ success: false, error: "Forbidden" });
   }
 
-  // ✅ VERCEL STANDARD: req.body IS ALREADY PARSED
-  const { policyId, email, reason } = req.body || {};
+  // 🔑 req.body IS NOW GUARANTEED
+  const { policyId, email, reason } = req.body;
 
   if (!policyId || typeof policyId !== "string") {
     return res.status(400).json({
@@ -22,7 +29,6 @@ export default async function handler(req, res) {
     });
   }
 
-  // 🔑 CREATE LICENSE (KEYGEN)
   const kgRes = await fetch(
     `https://api.keygen.sh/v1/accounts/${process.env.KEYGEN_ACCOUNT_ID}/licenses`,
     {
@@ -66,7 +72,6 @@ export default async function handler(req, res) {
     });
   }
 
-  // ✉️ EMAIL
   if (email) {
     const transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST,

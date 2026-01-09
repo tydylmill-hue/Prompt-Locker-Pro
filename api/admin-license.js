@@ -1,101 +1,69 @@
-/**
- * Vercel Serverless Function: /api/admin-license
- * Receives: { email, license, reason, source }
- * Sends an email using existing SMTP_* env vars (already set in your Vercel project)
- *
- * SECURITY:
- *  - If ADMIN_LICENSE_SECRET is set in Vercel env, this endpoint requires header:
- *      X-Admin-Secret: <ADMIN_LICENSE_SECRET>
- *  - CORS is restricted to your domains.
- */
-import nodemailer from "nodemailer";
-
-const ALLOWED_ORIGINS = new Set([
-  "https://promptlockerpro.com",
-  "https://www.promptlockerpro.com",
-]);
-
-function setCors(res, origin) {
-  if (origin && ALLOWED_ORIGINS.has(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Vary", "Origin");
-  }
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Admin-Secret");
-}
-
-function json(res, status, payload) {
-  res.statusCode = status;
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.end(JSON.stringify(payload));
-}
-
 export default async function handler(req, res) {
-  const origin = req.headers.origin || "";
-  setCors(res, origin);
-
-  if (req.method === "OPTIONS") {
-    res.statusCode = 204;
-    return res.end();
+  if (req.method !== 'POST') {
+    return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
-  if (req.method !== "POST") {
-    return json(res, 405, { success: false, error: "Method not allowed" });
+  const { policy, email, reason } = req.body;
+
+  const POLICY_MAP = {
+    trial: '6dcac539-ae20-43fd-b147-3d3b2ad8cc10',
+    month: '28deb095-05bf-4027-aad3-a1e53a5d6029',
+    year: 'd309d562-ad08-406a-8ad8-278751a949a6'
+  };
+
+  const policyId = POLICY_MAP[policy];
+
+  if (!policyId) {
+    return res.status(400).json({
+      success: false,
+      error: 'Unknown policy (no policyId and no matching policy constant)',
+      received: { policy }
+    });
   }
-
-  // Optional shared-secret auth
-  const expected = process.env.ADMIN_LICENSE_SECRET;
-  if (expected && expected.trim() !== "") {
-    const got = req.headers["x-admin-secret"];
-    if (!got || String(got) !== expected) {
-      return json(res, 403, { success: false, error: "Forbidden" });
-    }
-  }
-
-  const { email, license, reason } = req.body || {};
-  if (!email || !license) {
-    return json(res, 400, { success: false, error: "Missing email or license" });
-  }
-
-  // Build transporter from your existing Vercel env vars
-  const host = process.env.SMTP_HOST;
-  const port = Number(process.env.SMTP_PORT || 587);
-  const secure = String(process.env.SMTP_SECURE || "false").toLowerCase() === "true";
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
-  const from = process.env.SMTP_FROM || user;
-
-  if (!host || !user || !pass || !from) {
-    return json(res, 500, { success: false, error: "SMTP env vars missing" });
-  }
-
-  const transporter = nodemailer.createTransport({
-    host,
-    port,
-    secure,
-    auth: { user, pass },
-  });
-
-  const subject = "Your Prompt Locker Pro License Key";
-  const text =
-`Here is your Prompt Locker Pro license key:
-
-${license}
-
-Reason: ${reason || "admin_issue"}
-
-If you did not request this, please ignore this email.`;
 
   try {
-    await transporter.sendMail({
-      from,
-      to: email,
-      subject,
-      text,
+    const response = await fetch('https://api.keygen.sh/v1/licenses', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/vnd.api+json',
+        'Authorization': `Bearer ${process.env.KEYGEN_ADMIN_API_KEY}`
+      },
+      body: JSON.stringify({
+        data: {
+          type: 'licenses',
+          relationships: {
+            policy: {
+              data: { type: 'policies', id: policyId }
+            }
+          },
+          attributes: {
+            metadata: {
+              issued_by: 'admin',
+              reason: reason || 'admin_issue',
+              email: email || null
+            }
+          }
+        }
+      })
     });
 
-    return json(res, 200, { success: true });
+    const json = await response.json();
+
+    if (!response.ok) {
+      return res.status(500).json({ success: false, error: json });
+    }
+
+    const licenseKey = json.data.attributes.key;
+
+    return res.status(200).json({
+      success: true,
+      license: licenseKey
+    });
+
   } catch (err) {
-    return json(res, 500, { success: false, error: err?.message || "Email send failed" });
+    return res.status(500).json({
+      success: false,
+      error: err.message
+    });
   }
 }

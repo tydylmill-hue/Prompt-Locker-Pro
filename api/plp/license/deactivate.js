@@ -7,7 +7,6 @@
  */
 
 export default async function handler(req, res) {
-
   if (req.method !== "POST") {
     return res.status(405).json({ valid: false, error: "method_not_allowed" });
   }
@@ -41,9 +40,9 @@ export default async function handler(req, res) {
 
     const licenseId = licenseData.data.id;
 
-    /* STEP 2 — Find machine by fingerprint */
-    const machineRes = await fetch(
-      `https://api.keygen.sh/v1/accounts/${ACCOUNT}/machines?filter[fingerprint]=${installId}`,
+    /* STEP 2 — Fetch machines ATTACHED TO THIS LICENSE (scoped) */
+    const machinesRes = await fetch(
+      `https://api.keygen.sh/v1/accounts/${ACCOUNT}/licenses/${licenseId}/machines`,
       {
         headers: {
           "Authorization": `Bearer ${ADMIN_KEY}`,
@@ -52,16 +51,23 @@ export default async function handler(req, res) {
       }
     );
 
-    const machineData = await machineRes.json();
-    if (!machineData?.data?.length) {
-      // Idempotent success — no machine attached
-      return res.status(200).json({ valid: true, status: "already_deactivated" });
+    const machinesData = await machinesRes.json();
+    const machine = machinesData?.data?.find(
+      m => m.attributes?.fingerprint === installId
+    );
+
+    if (!machine) {
+      // Idempotent success — no machine attached to this license
+      return res.status(200).json({
+        valid: true,
+        status: "already_deactivated"
+      });
     }
 
-    const machineId = machineData.data[0].id;
+    const machineId = machine.id;
 
     /* STEP 3 — DETACH machine from license (THIS FREES THE SEAT) */
-    await fetch(
+    const detachRes = await fetch(
       `https://api.keygen.sh/v1/accounts/${ACCOUNT}/licenses/${licenseId}/relationships/machines`,
       {
         method: "DELETE",
@@ -75,8 +81,13 @@ export default async function handler(req, res) {
       }
     );
 
-    /* STEP 4 — Delete machine record (optional cleanup) */
-    await fetch(
+    if (!detachRes.ok) {
+      const text = await detachRes.text();
+      throw new Error(`Detach failed: ${detachRes.status} ${text}`);
+    }
+
+    /* STEP 4 — Delete machine record (cleanup only) */
+    const deleteRes = await fetch(
       `https://api.keygen.sh/v1/accounts/${ACCOUNT}/machines/${machineId}`,
       {
         method: "DELETE",
@@ -86,6 +97,11 @@ export default async function handler(req, res) {
         }
       }
     );
+
+    if (!deleteRes.ok && deleteRes.status !== 404) {
+      const text = await deleteRes.text();
+      throw new Error(`Machine delete failed: ${deleteRes.status} ${text}`);
+    }
 
     return res.status(200).json({
       valid: true,
